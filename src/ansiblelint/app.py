@@ -1,10 +1,11 @@
 """Application."""
 import logging
 import os
-from typing import TYPE_CHECKING, List, Type
+from typing import TYPE_CHECKING, Any, List, Type
 
 from ansiblelint import formatters
 from ansiblelint.color import console
+from ansiblelint.errors import MatchError
 
 if TYPE_CHECKING:
     from argparse import Namespace
@@ -26,7 +27,7 @@ class App:
         formatter_factory = choose_formatter_factory(options)
         self.formatter = formatter_factory(options.cwd, options.display_relative_path)
 
-    def render_matches(self, matches: List) -> None:
+    def render_matches(self, matches: List[MatchError]) -> None:
         """Display given matches."""
         if isinstance(self.formatter, formatters.CodeclimateJSONFormatter):
             # If formatter CodeclimateJSONFormatter is chosen,
@@ -65,15 +66,15 @@ class App:
 
 def choose_formatter_factory(
     options_list: "Namespace",
-) -> Type[formatters.BaseFormatter]:
+) -> Type[formatters.BaseFormatter[Any]]:
     """Select an output formatter based on the incoming command line arguments."""
-    r: Type[formatters.BaseFormatter] = formatters.Formatter
+    r: Type[formatters.BaseFormatter[Any]] = formatters.Formatter
     if options_list.format == 'quiet':
         r = formatters.QuietFormatter
-    elif options_list.parseable or options_list.format == 'pep8':
-        r = formatters.ParseableFormatter
     elif options_list.parseable_severity:
         r = formatters.ParseableSeverityFormatter
+    elif options_list.parseable or options_list.format == 'pep8':
+        r = formatters.ParseableFormatter
     elif options_list.format == 'codeclimate':
         r = formatters.CodeclimateJSONFormatter
     return r

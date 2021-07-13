@@ -21,18 +21,19 @@
 """Command line implementation."""
 
 import errno
+import hashlib
 import logging
 import os
 import pathlib
 import subprocess
 import sys
+from argparse import Namespace
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Optional
 
 from enrich.console import should_do_markup
 
 from ansiblelint import cli
-from ansiblelint._prerun import check_ansible_presence, prepare_environment
 from ansiblelint.app import App
 from ansiblelint.color import (
     console,
@@ -41,9 +42,10 @@ from ansiblelint.color import (
     reconfigure,
     render_yaml,
 )
-from ansiblelint.config import options, used_old_tags
+from ansiblelint.config import options
 from ansiblelint.constants import ANSIBLE_MISSING_RC, EXIT_CONTROL_C_RC
 from ansiblelint.file_utils import cwd
+from ansiblelint.prerun import check_ansible_presence, prepare_environment
 from ansiblelint.skip_utils import normalize_tag
 from ansiblelint.version import __version__
 
@@ -56,7 +58,13 @@ _logger = logging.getLogger(__name__)
 
 def initialize_logger(level: int = 0) -> None:
     """Set up the global logging level based on the verbosity number."""
-    VERBOSITY_MAP = {0: logging.NOTSET, 1: logging.INFO, 2: logging.DEBUG}
+    VERBOSITY_MAP = {
+        -2: logging.ERROR,
+        -1: logging.WARNING,
+        0: logging.NOTSET,
+        1: logging.INFO,
+        2: logging.DEBUG,
+    }
 
     handler = logging.StreamHandler()
     formatter = logging.Formatter('%(levelname)-8s %(message)s')
@@ -70,9 +78,9 @@ def initialize_logger(level: int = 0) -> None:
     _logger.debug("Logging initialized to level %s", logging_level)
 
 
-def initialize_options(arguments: List[str]):
+def initialize_options(arguments: Optional[List[str]] = None) -> None:
     """Load config options and store them inside options module."""
-    new_options = cli.get_config(arguments)
+    new_options = cli.get_config(arguments or [])
     new_options.cwd = pathlib.Path.cwd()
 
     if new_options.version:
@@ -83,7 +91,7 @@ def initialize_options(arguments: List[str]):
             )
         )
         if err:
-            print(err, file=sys.stderr)
+            _logger.error(err)
             sys.exit(ANSIBLE_MISSING_RC)
         sys.exit(0)
 
@@ -99,18 +107,27 @@ def initialize_options(arguments: List[str]):
     options.skip_list = [normalize_tag(tag) for tag in options.skip_list]
     options.warn_list = [normalize_tag(tag) for tag in options.warn_list]
 
+    options.configured = True
+    # 6 chars of entropy should be enough
+    cache_key = hashlib.sha256(
+        os.path.abspath(options.project_dir).encode()
+    ).hexdigest()[:6]
+    options.cache_dir = "%s/ansible-lint/%s" % (
+        os.getenv("XDG_CACHE_HOME", os.path.expanduser("~/.cache")),
+        cache_key,
+    )
 
-def report_outcome(result: "LintResult", options, mark_as_success=False) -> int:
+
+def report_outcome(  # noqa: C901
+    result: "LintResult", options: Namespace, mark_as_success: bool = False
+) -> int:
     """Display information about how to skip found rules.
 
     Returns exit code, 2 if errors were found, 0 when only warnings were found.
     """
     failures = 0
     warnings = 0
-    msg = """\
-# .ansible-lint
-warn_list:  # or 'skip_list' to silence them completely
-"""
+    msg = ""
     matches_unignored = [match for match in result.matches if not match.ignored]
 
     # counting
@@ -121,6 +138,11 @@ warn_list:  # or 'skip_list' to silence them completely
         else:
             warnings += 1
 
+    # remove unskippable rules from the list
+    for rule_id in list(matched_rules.keys()):
+        if 'unskippable' in matched_rules[rule_id].tags:
+            matched_rules.pop(rule_id)
+
     entries = []
     for key in sorted(matched_rules.keys()):
         if {key, *matched_rules[key].tags}.isdisjoint(options.warn_list):
@@ -129,21 +151,33 @@ warn_list:  # or 'skip_list' to silence them completely
         if "experimental" in match.rule.tags:
             entries.append("  - experimental  # all rules tagged as experimental\n")
             break
-    msg += "".join(sorted(entries))
-
-    for k, v in used_old_tags.items():
-        _logger.warning(
-            "Replaced deprecated tag '%s' with '%s' but it will become an "
-            "error in the future.",
-            k,
-            v,
-        )
-
-    if result.matches and not options.quiet:
+    if entries:
         console_stderr.print(
             "You can skip specific rules or tags by adding them to your "
             "configuration file:"
         )
+        msg += """\
+# .ansible-lint
+warn_list:  # or 'skip_list' to silence them completely
+"""
+        msg += "".join(sorted(entries))
+
+    # Do not deprecate the old tags just yet. Why? Because it is not currently feasible
+    # to migrate old tags to new tags. There are a lot of things out there that still
+    # use ansible-lint 4 (for example, Ansible Galaxy and Automation Hub imports). If we
+    # replace the old tags, those tools will report warnings. If we do not replace them,
+    # ansible-lint 5 will report warnings.
+    #
+    # We can do the deprecation once the ecosystem caught up at least a bit.
+    # for k, v in used_old_tags.items():
+    #     _logger.warning(
+    #         "Replaced deprecated tag '%s' with '%s' but it will become an "
+    #         "error in the future.",
+    #         k,
+    #         v,
+    #     )
+
+    if result.matches and not options.quiet:
         console_stderr.print(render_yaml(msg))
         console_stderr.print(
             f"Finished with {failures} failure(s), {warnings} warning(s) "
@@ -155,7 +189,7 @@ warn_list:  # or 'skip_list' to silence them completely
     return 2
 
 
-def main(argv: List[str] = None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     """Linter CLI entry point."""
     if argv is None:
         argv = sys.argv
@@ -174,14 +208,18 @@ def main(argv: List[str] = None) -> int:
 
     # On purpose lazy-imports to avoid pre-loading Ansible
     # pylint: disable=import-outside-toplevel
-    from ansiblelint.generate_docs import rules_as_rich, rules_as_rst
+    from ansiblelint.generate_docs import rules_as_rich, rules_as_rst, rules_as_str
     from ansiblelint.rules import RulesCollection
 
     rules = RulesCollection(options.rulesdirs)
 
     if options.listrules:
 
-        _rule_format_map = {'plain': str, 'rich': rules_as_rich, 'rst': rules_as_rst}
+        _rule_format_map: Dict[str, Callable[..., Any]] = {
+            'plain': rules_as_str,
+            'rich': rules_as_rich,
+            'rst': rules_as_rst,
+        }
 
         console.print(_rule_format_map[options.format](rules), highlight=False)
         return 0
@@ -234,9 +272,9 @@ def main(argv: List[str] = None) -> int:
 
 
 @contextmanager
-def _previous_revision():
+def _previous_revision() -> Iterator[None]:
     """Create or update a temporary workdir containing the previous revision."""
-    worktree_dir = ".cache/old-rev"
+    worktree_dir = f"{options.cache_dir}/old-rev"
     revision = subprocess.run(
         ["git", "rev-parse", "HEAD^1"],
         check=True,

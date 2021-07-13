@@ -24,6 +24,7 @@ import re
 
 import pytest
 
+from ansiblelint.config import options
 from ansiblelint.file_utils import Lintable
 from ansiblelint.rules import RulesCollection
 from ansiblelint.testing import run_ansible_lint
@@ -44,29 +45,39 @@ def bracketsmatchtestfile() -> Lintable:
     return Lintable('examples/playbooks/bracketsmatchtest.yml', kind='playbook')
 
 
-def test_load_collection_from_directory(test_rules_collection):
+def test_load_collection_from_directory(test_rules_collection: RulesCollection) -> None:
     # two detected rules plus the internal ones
     assert len(test_rules_collection) == 5
 
 
-def test_run_collection(test_rules_collection, ematchtestfile):
+def test_run_collection(
+    test_rules_collection: RulesCollection, ematchtestfile: Lintable
+) -> None:
     matches = test_rules_collection.run(ematchtestfile)
     assert len(matches) == 3  # 3 occurrences of BANNED using TEST0001
     assert matches[0].linenumber == 2
 
 
-def test_tags(test_rules_collection, ematchtestfile, bracketsmatchtestfile):
-    matches = test_rules_collection.run(ematchtestfile, tags=['test1'])
+def test_tags(
+    test_rules_collection: RulesCollection,
+    ematchtestfile: Lintable,
+    bracketsmatchtestfile: Lintable,
+) -> None:
+    matches = test_rules_collection.run(ematchtestfile, tags={'test1'})
     assert len(matches) == 3
-    matches = test_rules_collection.run(ematchtestfile, tags=['test2'])
+    matches = test_rules_collection.run(ematchtestfile, tags={'test2'})
     assert len(matches) == 0
-    matches = test_rules_collection.run(bracketsmatchtestfile, tags=['test1'])
+    matches = test_rules_collection.run(bracketsmatchtestfile, tags={'test1'})
     assert len(matches) == 0
-    matches = test_rules_collection.run(bracketsmatchtestfile, tags=['test2'])
+    matches = test_rules_collection.run(bracketsmatchtestfile, tags={'test2'})
     assert len(matches) == 2
 
 
-def test_skip_tags(test_rules_collection, ematchtestfile, bracketsmatchtestfile):
+def test_skip_tags(
+    test_rules_collection: RulesCollection,
+    ematchtestfile: Lintable,
+    bracketsmatchtestfile: Lintable,
+) -> None:
     matches = test_rules_collection.run(ematchtestfile, skip_list=['test1'])
     assert len(matches) == 0
     matches = test_rules_collection.run(ematchtestfile, skip_list=['test2'])
@@ -77,7 +88,11 @@ def test_skip_tags(test_rules_collection, ematchtestfile, bracketsmatchtestfile)
     assert len(matches) == 0
 
 
-def test_skip_id(test_rules_collection, ematchtestfile, bracketsmatchtestfile):
+def test_skip_id(
+    test_rules_collection: RulesCollection,
+    ematchtestfile: Lintable,
+    bracketsmatchtestfile: Lintable,
+) -> None:
     matches = test_rules_collection.run(ematchtestfile, skip_list=['TEST0001'])
     assert len(matches) == 0
     matches = test_rules_collection.run(ematchtestfile, skip_list=['TEST0002'])
@@ -88,18 +103,20 @@ def test_skip_id(test_rules_collection, ematchtestfile, bracketsmatchtestfile):
     assert len(matches) == 0
 
 
-def test_skip_non_existent_id(test_rules_collection, ematchtestfile):
+def test_skip_non_existent_id(
+    test_rules_collection: RulesCollection, ematchtestfile: Lintable
+) -> None:
     matches = test_rules_collection.run(ematchtestfile, skip_list=['DOESNOTEXIST'])
     assert len(matches) == 3
 
 
-def test_no_duplicate_rule_ids(test_rules_collection):
+def test_no_duplicate_rule_ids(test_rules_collection: RulesCollection) -> None:
     real_rules = RulesCollection([os.path.abspath('./src/ansiblelint/rules')])
     rule_ids = [rule.id for rule in real_rules]
     assert not any(y > 1 for y in collections.Counter(rule_ids).values())
 
 
-def test_rich_rule_listing():
+def test_rich_rule_listing() -> None:
     """Test that rich list format output is rendered as a table.
 
     This check also offers the contract of having rule id, short and long
@@ -119,9 +136,12 @@ def test_rich_rule_listing():
 def test_rules_id_format() -> None:
     """Assure all our rules have consistent format."""
     rule_id_re = re.compile("^[a-z-]{4,30}$")
-    rules = RulesCollection([os.path.abspath('./src/ansiblelint/rules')])
+    options.enable_list = ['no-same-owner', 'no-log-password', 'no-same-owner']
+    rules = RulesCollection(
+        [os.path.abspath('./src/ansiblelint/rules')], options=options
+    )
     for rule in rules:
         assert rule_id_re.match(
             rule.id
-        ), f"R rule id {rule.id} did not match our required format."
-    assert len(rules) == 37
+        ), f"Rule id {rule.id} did not match our required format."
+    assert len(rules) == 40

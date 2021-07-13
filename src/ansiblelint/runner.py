@@ -84,6 +84,9 @@ class Runner:
 
         # Exclusions should be evaluated only using absolute paths in order
         # to work correctly.
+        if not file_path:
+            return False
+
         abs_path = os.path.abspath(file_path)
         _file_path = Path(file_path)
 
@@ -132,7 +135,7 @@ class Runner:
             files = [value for n, value in enumerate(files) if value not in files[:n]]
 
             for file in self.lintables:
-                if file in self.checked_files:
+                if file in self.checked_files or not file.kind:
                     continue
                 _logger.debug(
                     "Examining %s of type %s",
@@ -165,6 +168,8 @@ class Runner:
                         self.lintables.add(child)
                         files.append(child)
                 except MatchError as e:
+                    if not e.filename:
+                        e.filename = str(lintable.path)
                     e.rule = LoadingFailureRule()
                     yield e
                 except AttributeError:

@@ -26,9 +26,14 @@ import os
 import os.path
 import subprocess
 import sys
+from argparse import Namespace
 from pathlib import Path
+from typing import Any, Dict, List, Sequence, Tuple, Union
 
 import pytest
+from _pytest.capture import CaptureFixture
+from _pytest.logging import LogCaptureFixture
+from _pytest.monkeypatch import MonkeyPatch
 
 from ansiblelint import cli, constants, file_utils, utils
 from ansiblelint.__main__ import initialize_logger
@@ -40,6 +45,7 @@ from ansiblelint.file_utils import (
     expand_paths_vars,
     normpath,
 )
+from ansiblelint.testing import run_ansible_lint
 
 
 @pytest.mark.parametrize(
@@ -65,7 +71,12 @@ from ansiblelint.file_utils import (
         ),
     ),
 )
-def test_tokenize(string, expected_cmd, expected_args, expected_kwargs):
+def test_tokenize(
+    string: str,
+    expected_cmd: str,
+    expected_args: Sequence[str],
+    expected_kwargs: Dict[str, Any],
+) -> None:
     """Test that tokenize works for different input types."""
     (cmd, args, kwargs) = utils.tokenize(string)
     assert cmd == expected_cmd
@@ -95,7 +106,9 @@ def test_tokenize(string, expected_cmd, expected_args, expected_kwargs):
         ),
     ),
 )
-def test_normalize(reference_form, alternate_forms):
+def test_normalize(
+    reference_form: Dict[str, Any], alternate_forms: Tuple[Dict[str, Any]]
+) -> None:
     """Test that tasks specified differently are normalized same way."""
     normal_form = utils.normalize_task(reference_form, 'tasks.yml')
 
@@ -103,7 +116,7 @@ def test_normalize(reference_form, alternate_forms):
         assert normal_form == utils.normalize_task(form, 'tasks.yml')
 
 
-def test_normalize_complex_command():
+def test_normalize_complex_command() -> None:
     """Test that tasks specified differently are normalized same way."""
     task1 = dict(
         name="hello", action={'module': 'pip', 'name': 'df', 'editable': 'false'}
@@ -122,7 +135,7 @@ def test_normalize_complex_command():
     )
 
 
-def test_extract_from_list():
+def test_extract_from_list() -> None:
     """Check that tasks get extracted from blocks if present."""
     block = {
         'block': [{'tasks': {'name': 'hello', 'command': 'whoami'}}],
@@ -134,7 +147,7 @@ def test_extract_from_list():
     test_list = utils.extract_from_list(blocks, ['block'])
     test_none = utils.extract_from_list(blocks, ['test_none'])
 
-    assert list(block['block']) == test_list
+    assert list(block['block']) == test_list  # type: ignore
     assert list() == test_none
     with pytest.raises(RuntimeError):
         utils.extract_from_list(blocks, ['test_string'])
@@ -161,13 +174,37 @@ def test_extract_from_list():
         ),
     ),
 )
-def test_template(template, output):
+def test_template(template: str, output: str) -> None:
     """Verify that resolvable template vars and filters get rendered."""
     result = utils.template('/base/dir', template, dict(playbook_dir='/a/b/c'))
     assert result == output
 
 
-def test_task_to_str_unicode():
+@pytest.mark.parametrize(
+    ("role", "expect_warning"),
+    (
+        ("template_lookup", False),
+        ("template_lookup_missing", True),
+    ),
+)
+def test_template_lookup(role: str, expect_warning: bool) -> None:
+    """Assure lookup plugins used in templates does not trigger Ansible warnings."""
+    task_path = os.path.realpath(
+        os.path.join(
+            os.path.dirname(os.path.realpath(__file__)),
+            "..",
+            "examples",
+            "roles",
+            role,
+            "tasks",
+            "main.yml",
+        )
+    )
+    result = run_ansible_lint("-v", task_path)
+    assert ("Unable to find" in result.stderr) == expect_warning
+
+
+def test_task_to_str_unicode() -> None:
     """Ensure that extracting messages from tasks preserves Unicode."""
     task = dict(fail=dict(msg=u"unicode é ô à"))
     result = utils.task_to_str(utils.normalize_task(task, 'filename.yml'))
@@ -181,12 +218,12 @@ def test_task_to_str_unicode():
         pytest.param('a/b/../', id='str'),
     ),
 )
-def test_normpath_with_path_object(path):
+def test_normpath_with_path_object(path: str) -> None:
     """Ensure that relative parent dirs are normalized in paths."""
     assert normpath(path) == "a"
 
 
-def test_expand_path_vars(monkeypatch):
+def test_expand_path_vars(monkeypatch: MonkeyPatch) -> None:
     """Ensure that tilde and env vars are expanded in paths."""
     test_path = '/test/path'
     monkeypatch.setenv('TEST_PATH', test_path)
@@ -203,34 +240,37 @@ def test_expand_path_vars(monkeypatch):
         pytest.param('~', os.path.expanduser('~'), id='home'),
     ),
 )
-def test_expand_paths_vars(test_path, expected, monkeypatch):
+def test_expand_paths_vars(
+    test_path: Union[str, Path], expected: str, monkeypatch: MonkeyPatch
+) -> None:
     """Ensure that tilde and env vars are expanded in paths lists."""
     monkeypatch.setenv('TEST_PATH', '/test/path')
-    assert expand_paths_vars([test_path]) == [expected]
+    assert expand_paths_vars([test_path]) == [expected]  # type: ignore
 
 
 @pytest.mark.parametrize(
     ('reset_env_var', 'message_prefix'),
     (
+        # simulate absence of git command
         ('PATH', "Failed to locate command: "),
-        ('GIT_DIR', "Failed to discover yaml files to lint using git: "),
+        # simulate a missing git repo
+        ('GIT_DIR', "Looking up for files"),
     ),
-    ids=('no Git installed', 'outside Git repository'),
+    ids=('no-git-cli', 'outside-git-repo'),
 )
-def test_get_yaml_files_git_verbose(reset_env_var, message_prefix, monkeypatch, caplog):
+def test_discover_lintables_git_verbose(
+    reset_env_var: str,
+    message_prefix: str,
+    monkeypatch: MonkeyPatch,
+    caplog: LogCaptureFixture,
+) -> None:
     """Ensure that autodiscovery lookup failures are logged."""
     options = cli.get_config(['-v'])
     initialize_logger(options.verbosity)
     monkeypatch.setenv(reset_env_var, '')
-    file_utils.get_yaml_files(options)
+    file_utils.discover_lintables(options)
 
-    expected_info = (
-        "ansiblelint",
-        logging.INFO,
-        'Discovering files to lint: git ls-files -z *.yaml *.yml',
-    )
-
-    assert expected_info in caplog.record_tuples
+    assert any(m[2].startswith("Looking up for files") for m in caplog.record_tuples)
     assert any(m.startswith(message_prefix) for m in caplog.messages)
 
 
@@ -239,7 +279,9 @@ def test_get_yaml_files_git_verbose(reset_env_var, message_prefix, monkeypatch, 
     (True, False),
     ids=('in Git', 'outside Git'),
 )
-def test_get_yaml_files_silent(is_in_git, monkeypatch, capsys):
+def test_discover_lintables_silent(
+    is_in_git: bool, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str]
+) -> None:
     """Verify that no stderr output is displayed while discovering yaml files.
 
     (when the verbosity is off, regardless of the Git or Git-repo presence)
@@ -257,7 +299,7 @@ def test_get_yaml_files_silent(is_in_git, monkeypatch, capsys):
     )
 
     monkeypatch.chdir(str(lint_path))
-    files = file_utils.get_yaml_files(options)
+    files = file_utils.discover_lintables(options)
     stderr = capsys.readouterr().err
     assert not stderr, 'No stderr output is expected when the verbosity is off'
     assert (
@@ -267,19 +309,19 @@ def test_get_yaml_files_silent(is_in_git, monkeypatch, capsys):
     )
 
 
-def test_get_yaml_files_umlaut(monkeypatch):
-    """Verify that filenames containing German umlauts are not garbled by the get_yaml_files."""
+def test_discover_lintables_umlaut(monkeypatch: MonkeyPatch) -> None:
+    """Verify that filenames containing German umlauts are not garbled by the discover_lintables."""
     options = cli.get_config([])
     test_dir = Path(__file__).resolve().parent
     lint_path = test_dir / '..' / 'examples' / 'playbooks'
 
     monkeypatch.chdir(str(lint_path))
-    files = file_utils.get_yaml_files(options)
+    files = file_utils.discover_lintables(options)
     assert '"with-umlaut-\\303\\244.yml"' not in files
     assert 'with-umlaut-ä.yml' in files
 
 
-def test_logger_debug(caplog):
+def test_logger_debug(caplog: LogCaptureFixture) -> None:
     """Test that the double verbosity arg causes logger to be DEBUG."""
     options = cli.get_config(['-vv'])
     initialize_logger(options.verbosity)
@@ -293,7 +335,7 @@ def test_logger_debug(caplog):
     assert expected_info in caplog.record_tuples
 
 
-def test_cli_auto_detect(capfd):
+def test_cli_auto_detect(capfd: CaptureFixture[str]) -> None:
     """Test that run without arguments it will detect and lint the entire repository."""
     cmd = [
         sys.executable,
@@ -312,10 +354,14 @@ def test_cli_auto_detect(capfd):
     out, err = capfd.readouterr()
 
     # Confirmation that it runs in auto-detect mode
-    assert "Discovering files to lint: git ls-files -z *.yaml *.yml" in err
+    assert (
+        "Discovered files to lint using: git ls-files --cached --others --exclude-standard -z"
+        in err
+    )
+    assert "Excluded removed files using: git ls-files --deleted -z" in err
     # An expected rule match from our examples
     assert (
-        "examples/playbooks/empty_playbook.yml:0: "
+        "examples/playbooks/empty_playbook.yml:1: "
         "syntax-check Empty playbook, nothing to do" in out
     )
     # assures that our .ansible-lint exclude was effective in excluding github files
@@ -327,7 +373,7 @@ def test_cli_auto_detect(capfd):
     assert "Executing syntax check on examples/playbooks/mocked_dependency.yml" in err
 
 
-def test_is_playbook():
+def test_is_playbook() -> None:
     """Verify that we can detect a playbook as a playbook."""
     assert utils.is_playbook("examples/playbooks/always-run-success.yml")
 
@@ -364,35 +410,41 @@ def test_is_playbook():
             "../roles/geerlingguy.mysql/tasks/configure.yml",
             "tasks",
         ),  # relative path involved
+        ("galaxy.yml", "galaxy"),
+        ("foo.j2.yml", "jinja2"),
+        ("foo.yml.j2", "jinja2"),
+        ("foo.j2.yaml", "jinja2"),
+        ("foo.yaml.j2", "jinja2"),
     ),
 )
-def test_default_kinds(monkeypatch, path: str, kind: FileType) -> None:
+def test_default_kinds(monkeypatch: MonkeyPatch, path: str, kind: FileType) -> None:
     """Verify auto-detection logic based on DEFAULT_KINDS."""
     options = cli.get_config([])
 
-    def mockreturn(options):
-        return [path]
+    def mockreturn(options: Namespace) -> Dict[str, Any]:
+        return {path: kind}
 
     # assert Lintable is able to determine file type
     lintable_detected = Lintable(path)
     lintable_expected = Lintable(path, kind=kind)
     assert lintable_detected == lintable_expected
 
-    monkeypatch.setattr(utils, 'get_yaml_files', mockreturn)
-    result = utils.get_lintables(options)
+    monkeypatch.setattr(file_utils, 'discover_lintables', mockreturn)
+    result = file_utils.discover_lintables(options)
     # get_lintable could return additional files and we only care to see
     # that the given file is among the returned list.
-    assert lintable_expected in result
+    assert lintable_detected.name in result
+    assert lintable_detected.kind == result[lintable_expected.name]
 
 
-def test_auto_detect_exclude(monkeypatch):
+def test_auto_detect_exclude(monkeypatch: MonkeyPatch) -> None:
     """Verify that exclude option can be used to narrow down detection."""
     options = cli.get_config(['--exclude', 'foo'])
 
-    def mockreturn(options):
+    def mockreturn(options: Namespace) -> List[str]:
         return ['foo/playbook.yml', 'bar/playbook.yml']
 
-    monkeypatch.setattr(utils, 'get_yaml_files', mockreturn)
+    monkeypatch.setattr(utils, 'discover_lintables', mockreturn)
     result = utils.get_lintables(options)
     assert result == [Lintable('bar/playbook.yml', kind='playbook')]
 
@@ -414,7 +466,9 @@ _CUSTOM_RULEDIRS = [
         (_CUSTOM_RULEDIRS, False, _CUSTOM_RULEDIRS),
     ),
 )
-def test_get_rules_dirs(user_ruledirs, use_default, expected):
+def test_get_rules_dirs(
+    user_ruledirs: List[str], use_default: bool, expected: List[str]
+) -> None:
     """Test it returns expected dir lists."""
     assert get_rules_dirs(user_ruledirs, use_default) == expected
 
@@ -433,14 +487,17 @@ def test_get_rules_dirs(user_ruledirs, use_default, expected):
     ),
 )
 def test_get_rules_dirs_with_custom_rules(
-    user_ruledirs, use_default, expected, monkeypatch
-):
+    user_ruledirs: List[str],
+    use_default: bool,
+    expected: List[str],
+    monkeypatch: MonkeyPatch,
+) -> None:
     """Test it returns expected dir lists when custom rules exist."""
     monkeypatch.setenv(constants.CUSTOM_RULESDIR_ENVVAR, str(_CUSTOM_RULESDIR))
     assert get_rules_dirs(user_ruledirs, use_default) == expected
 
 
-def test_nested_items():
+def test_nested_items() -> None:
     """Verify correct function of nested_items()."""
     data = {"foo": "text", "bar": {"some": "text2"}, "fruits": ["apple", "orange"]}
 

@@ -1,13 +1,13 @@
 import pytest
 
+from ansiblelint.testing import RunFromText
+
 ROLE_TASKS = '''\
 ---
-- name: test command-instead-of-module
-  command: git log
-  changed_when: false
-- name: test command-instead-of-module (skipped)
-  command: git log  # noqa command-instead-of-module
-  changed_when: false
+- debug:
+    msg: this should fail linting due lack of name
+- debug:  # noqa unnamed-task
+    msg: this should pass due to noqa comment
 '''
 
 ROLE_TASKS_WITH_BLOCK = '''\
@@ -89,12 +89,14 @@ ROLE_TASKS_WITH_BLOCK_BECOME = '''\
 '''
 
 
-def test_role_tasks(default_text_runner):
+def test_role_tasks(default_text_runner: RunFromText) -> None:
     results = default_text_runner.run_role_tasks_main(ROLE_TASKS)
-    assert len(results) == 1
+    assert len(results) == 1, results
+    assert results[0].linenumber == 2
+    assert results[0].rule.id == "unnamed-task"
 
 
-def test_role_tasks_with_block(default_text_runner):
+def test_role_tasks_with_block(default_text_runner: RunFromText) -> None:
     results = default_text_runner.run_role_tasks_main(ROLE_TASKS_WITH_BLOCK)
     assert len(results) == 4
 
@@ -107,11 +109,13 @@ def test_role_tasks_with_block(default_text_runner):
     ),
     ids=('generic', 'with block become inheritance'),
 )
-def test_playbook(default_text_runner, playbook_src, results_num):
+def test_playbook(
+    default_text_runner: RunFromText, playbook_src: str, results_num: int
+) -> None:
     results = default_text_runner.run_playbook(playbook_src)
     assert len(results) == results_num
 
 
-def test_role_meta(default_text_runner):
+def test_role_meta(default_text_runner: RunFromText) -> None:
     results = default_text_runner.run_role_meta_main(ROLE_META)
     assert len(results) == 0

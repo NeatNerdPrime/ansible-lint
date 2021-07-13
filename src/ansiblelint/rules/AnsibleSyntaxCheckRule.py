@@ -3,7 +3,7 @@ import json
 import re
 import subprocess
 import sys
-from typing import List
+from typing import Any, List
 
 from ansiblelint._internal.rules import BaseRule, RuntimeErrorRule
 from ansiblelint.config import options
@@ -12,6 +12,18 @@ from ansiblelint.file_utils import Lintable
 from ansiblelint.logger import timed_info
 from ansiblelint.rules import AnsibleLintRule
 from ansiblelint.text import strip_ansi_escape
+
+DESCRIPTION = """\
+Running ``ansible-playbook --syntax-check ...`` failed.
+
+This error **cannot be disabled** due to being a prerequisite for other steps.
+You can either exclude these files from linting or better assure they can be
+loaded by Ansible. This is often achieved by editing inventory file and/or
+``ansible.cfg`` so ansible can load required variables.
+
+If undefined variables are the failure reason you could use jinja default()
+filter in order to provide fallback values.
+"""
 
 _ansible_syntax_check_re = re.compile(
     r"^ERROR! (?P<title>[^\n]*)\n\nThe error appears to be in "
@@ -29,9 +41,9 @@ class AnsibleSyntaxCheckRule(AnsibleLintRule):
 
     id = "syntax-check"
     shortdesc = "Ansible syntax check failed"
-    description = "Running ansible-playbook --syntax-check ... reported an error."
+    description = DESCRIPTION
     severity = "VERY_HIGH"
-    tags = ["core"]
+    tags = ["core", "unskippable"]
     version_added = "v5.0.0"
 
     @staticmethod
@@ -63,7 +75,7 @@ class AnsibleSyntaxCheckRule(AnsibleLintRule):
         if run.returncode != 0:
             message = None
             filename = str(lintable.path)
-            linenumber = 0
+            linenumber = 1
             column = None
             tag = None
 
@@ -133,7 +145,7 @@ if "pytest" in sys.modules:
         """Validate detection of empty-playbook."""
         lintable = Lintable('examples/playbooks/empty_playbook.yml', kind='playbook')
         result = AnsibleSyntaxCheckRule._get_ansible_syntax_check_matches(lintable)
-        assert result[0].linenumber == 0
+        assert result[0].linenumber == 1
         # We internally convert absolute paths returned by ansible into paths
         # relative to current directory.
         assert result[0].filename.endswith("/empty_playbook.yml")
@@ -141,7 +153,7 @@ if "pytest" in sys.modules:
         assert result[0].message == "Empty playbook, nothing to do"
         assert len(result) == 1
 
-    def test_extra_vars_passed_to_command(config_options) -> None:
+    def test_extra_vars_passed_to_command(config_options: Any) -> None:
         """Validate `extra-vars` are passed to syntax check command."""
         config_options.extra_vars = {
             'foo': 'bar',

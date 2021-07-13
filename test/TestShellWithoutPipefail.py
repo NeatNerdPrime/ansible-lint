@@ -48,6 +48,12 @@ SUCCESS_TASKS = '''
         set -eo pipefail
         false | cat
 
+    - name: pipeline with pipefail not at first line
+      shell: |
+        echo foo
+        set -eo pipefail
+        false | cat
+
     - name: pipeline without pipefail, ignoring errors
       shell: false | cat
       ignore_errors: true
@@ -65,6 +71,10 @@ SUCCESS_TASKS = '''
     - shell: |
         set -o pipefail
         df | grep '/dev'
+
+    - name: should not fail due to ignore_errors being true
+      shell: false | cat
+      ignore_errors: true
 '''
 
 
@@ -72,13 +82,13 @@ class TestShellWithoutPipeFail(unittest.TestCase):
     collection = RulesCollection()
     collection.register(ShellWithoutPipefail())
 
-    def setUp(self):
+    def setUp(self) -> None:
         self.runner = RunFromText(self.collection)
 
-    def test_fail(self):
+    def test_fail(self) -> None:
         results = self.runner.run_playbook(FAIL_TASKS)
         self.assertEqual(3, len(results))
 
-    def test_success(self):
+    def test_success(self) -> None:
         results = self.runner.run_playbook(SUCCESS_TASKS)
         self.assertEqual(0, len(results))

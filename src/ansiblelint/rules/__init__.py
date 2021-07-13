@@ -5,9 +5,11 @@ import importlib.util
 import logging
 import os
 import re
+from argparse import Namespace
 from collections import defaultdict
+from functools import lru_cache
 from importlib.abc import Loader
-from typing import Iterator, List, Optional, Union
+from typing import Any, Dict, Iterator, List, Optional, Set, Union
 
 import ansiblelint.utils
 from ansiblelint._internal.rules import (
@@ -16,6 +18,7 @@ from ansiblelint._internal.rules import (
     LoadingFailureRule,
     RuntimeErrorRule,
 )
+from ansiblelint.config import get_rule_config, options
 from ansiblelint.errors import MatchError
 from ansiblelint.file_utils import Lintable
 from ansiblelint.skip_utils import append_skipped_rules, get_rule_skips_from_line
@@ -24,6 +27,15 @@ _logger = logging.getLogger(__name__)
 
 
 class AnsibleLintRule(BaseRule):
+    @property
+    def rule_config(self) -> Dict[str, Any]:
+        return get_rule_config(self.id)
+
+    @lru_cache()
+    def get_config(self, key: str) -> Any:
+        """Return a configured value for given key string."""
+        return self.rule_config.get(key, None)
+
     def __repr__(self) -> str:
         """Return a AnsibleLintRule instance representation."""
         return self.id + ": " + self.shortdesc
@@ -39,7 +51,7 @@ class AnsibleLintRule(BaseRule):
     def create_matcherror(
         self,
         message: Optional[str] = None,
-        linenumber: int = 0,
+        linenumber: int = 1,
         details: str = "",
         filename: Optional[Union[str, Lintable]] = None,
         tag: str = "",
@@ -88,7 +100,11 @@ class AnsibleLintRule(BaseRule):
     # https://github.com/ansible-community/ansible-lint/issues/744
     def matchtasks(self, file: Lintable) -> List[MatchError]:
         matches: List[MatchError] = []
-        if not self.matchtask or file.kind == 'meta':
+        if (
+            not self.matchtask
+            or file.kind not in ['handlers', 'tasks', 'playbook']
+            or str(file.base_kind) != 'text/yaml'
+        ):
             return matches
 
         yaml = ansiblelint.utils.parse_yaml_linenumbers(file)
@@ -108,7 +124,7 @@ class AnsibleLintRule(BaseRule):
 
             if 'action' not in task:
                 continue
-            result = self.matchtask(task)
+            result = self.matchtask(task, file=file)
             if not result:
                 continue
 
@@ -125,17 +141,9 @@ class AnsibleLintRule(BaseRule):
             matches.append(m)
         return matches
 
-    @staticmethod
-    def _matchplay_linenumber(play, optional_linenumber):
-        try:
-            (linenumber,) = optional_linenumber
-        except ValueError:
-            linenumber = play[ansiblelint.utils.LINE_NUMBER_KEY]
-        return linenumber
-
     def matchyaml(self, file: Lintable) -> List[MatchError]:
         matches: List[MatchError] = []
-        if not self.matchplay:
+        if not self.matchplay or str(file.base_kind) != 'text/yaml':
             return matches
 
         yaml = ansiblelint.utils.parse_yaml_linenumbers(file)
@@ -143,6 +151,8 @@ class AnsibleLintRule(BaseRule):
         # file contains a single string. YAML spec allows this but we consider
         # this an fatal error.
         if isinstance(yaml, str):
+            if yaml.startswith('$ANSIBLE_VAULT'):
+                return []
             return [MatchError(filename=str(file.path), rule=LoadingFailureRule())]
         if not yaml:
             return matches
@@ -166,10 +176,13 @@ class AnsibleLintRule(BaseRule):
         return matches
 
 
-def load_plugins(directory: str) -> List[AnsibleLintRule]:
-    """Return a list of rule classes."""
-    result = []
+def is_valid_rule(rule: AnsibleLintRule) -> bool:
+    """Check if given rule is valid or not."""
+    return isinstance(rule, AnsibleLintRule) and bool(rule.id) and bool(rule.shortdesc)
 
+
+def load_plugins(directory: str) -> Iterator[AnsibleLintRule]:
+    """Yield a rule class."""
     for pluginfile in glob.glob(os.path.join(directory, '[A-Za-z]*.py')):
 
         pluginname = os.path.basename(pluginfile.replace('.py', ''))
@@ -178,14 +191,21 @@ def load_plugins(directory: str) -> List[AnsibleLintRule]:
         if spec and isinstance(spec.loader, Loader):
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
-            obj = getattr(module, pluginname)()
-            result.append(obj)
-    return result
+            try:
+                rule = getattr(module, pluginname)()
+                if is_valid_rule(rule):
+                    yield rule
+
+            except (TypeError, ValueError, AttributeError):
+                _logger.warning("Skipped invalid rule from %s", pluginname)
 
 
 class RulesCollection:
-    def __init__(self, rulesdirs: Optional[List[str]] = None) -> None:
+    def __init__(
+        self, rulesdirs: Optional[List[str]] = None, options: Namespace = options
+    ) -> None:
         """Initialize a RulesCollection instance."""
+        self.options = options
         if rulesdirs is None:
             rulesdirs = []
         self.rulesdirs = ansiblelint.file_utils.expand_paths_vars(rulesdirs)
@@ -197,11 +217,14 @@ class RulesCollection:
         )
         for rulesdir in self.rulesdirs:
             _logger.debug("Loading rules from %s", rulesdir)
-            self.extend(load_plugins(rulesdir))
+            for rule in load_plugins(rulesdir):
+                self.register(rule)
         self.rules = sorted(self.rules)
 
     def register(self, obj: AnsibleLintRule) -> None:
-        self.rules.append(obj)
+        # We skip opt-in rules which were not manually enabled
+        if 'opt-in' not in obj.tags or obj.id in self.options.enable_list:
+            self.rules.append(obj)
 
     def __iter__(self) -> Iterator[BaseRule]:
         """Return the iterator over the rules in the RulesCollection."""
@@ -215,7 +238,7 @@ class RulesCollection:
         self.rules.extend(more)
 
     def run(
-        self, file: Lintable, tags=set(), skip_list: List[str] = []
+        self, file: Lintable, tags: Set[str] = set(), skip_list: List[str] = []
     ) -> List[MatchError]:
         matches: List[MatchError] = list()
 

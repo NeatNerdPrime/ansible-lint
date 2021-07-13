@@ -3,6 +3,7 @@ import os
 import sys
 from typing import TYPE_CHECKING, List
 
+from ansiblelint.config import options
 from ansiblelint.file_utils import Lintable
 from ansiblelint.rules import AnsibleLintRule
 from ansiblelint.skip_utils import get_rule_skips_from_line
@@ -17,12 +18,18 @@ try:
     from yamllint.config import YamlLintConfig
     from yamllint.linter import run as run_yamllint
 except ImportError:
-    pass
+    # missing library is ignored unless yaml is exclitely added to enable_list
+    if 'yaml' in options.enable_list:
+        raise RuntimeError(
+            'Failed to load yamllint library and ansible-linted was configured to require it.'
+        )
 
 
 YAMLLINT_CONFIG = """
 extends: default
 rules:
+  # https://github.com/adrienverge/yamllint/issues/384
+  comments-indentation: false
   document-start: disable
   # 160 chars was the default used by old E204 rule, but
   # you can easily change it or disable in your .yamllint file.
@@ -38,6 +45,10 @@ You can fully disable all of them by adding 'yaml' to the 'skip_list'.
 Specific tag identifiers that are printed at the end of rule name,
 like 'trailing-spaces' or 'indentation' can also be be skipped, allowing
 you to have a more fine control.
+
+By default this rule is not used when yamllint library is missing. If you want
+to make its absence a runtime failure, please add 'yaml' to 'enable_list'
+inside the configuration file.
 """
 
 
@@ -75,14 +86,19 @@ class YamllintRule(AnsibleLintRule):
     def matchyaml(self, file: Lintable) -> List["MatchError"]:
         """Return matches found for a specific YAML text."""
         matches: List["MatchError"] = []
-        filtered_matches = []
-        if file.kind == 'role':
+        filtered_matches: List["MatchError"] = []
+        if str(file.base_kind) != 'text/yaml':
             return matches
 
         if YamllintRule.config:
             for p in run_yamllint(
                 file.content, YamllintRule.config, filepath=file.path
             ):
+                self.severity = 'VERY_LOW'
+                if p.level == "error":
+                    self.severity = 'MEDIUM'
+                if p.desc.endswith("(syntax)"):
+                    self.severity = 'VERY_HIGH'
                 matches.append(
                     self.create_matcherror(
                         message=p.desc,

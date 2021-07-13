@@ -43,6 +43,7 @@ author:
 EXAMPLES = '''mocked'''
 RETURN = '''mocked'''
 
+
 def main():
     result = dict(
         changed=False,
@@ -69,6 +70,7 @@ FileType = Literal[
     "requirements",
     "role",  # that is a folder!
     "yaml",  # generic yaml file, previously reported as unknown file type
+    "",  # unknown file type
 ]
 
 

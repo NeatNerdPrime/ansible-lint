@@ -2,6 +2,7 @@
 import copy
 import logging
 import os
+import pathlib
 import subprocess
 import sys
 from argparse import Namespace
@@ -11,9 +12,11 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Set, Union
 
+# import wcmatch
 import wcmatch.pathlib
+from wcmatch.wcmatch import RECURSIVE, WcMatch
 
-from ansiblelint.config import options
+from ansiblelint.config import BASE_KINDS, options
 from ansiblelint.constants import FileType
 
 if TYPE_CHECKING:
@@ -67,12 +70,17 @@ def expand_paths_vars(paths: List[str]) -> List[str]:
     return paths
 
 
-def kind_from_path(path: Path) -> str:
-    """Determine the file kind based on its name."""
+def kind_from_path(path: Path, base: bool = False) -> FileType:
+    """Determine the file kind based on its name.
+
+    When called with base=True, it will return the base file type instead
+    of the explicit one. That is expected to return 'yaml' for any yaml files.
+    """
     # pathlib.Path.match patterns are very limited, they do not support *a*.yml
     # glob.glob supports **/foo.yml but not multiple extensions
     pathex = wcmatch.pathlib.PurePath(path.absolute().resolve())
-    for entry in options.kinds:
+    kinds = options.kinds if not base else BASE_KINDS
+    for entry in kinds:
         for k, v in entry.items():
             if pathex.globmatch(
                 v,
@@ -82,13 +90,20 @@ def kind_from_path(path: Path) -> str:
                     | wcmatch.pathlib.DOTGLOB
                 ),
             ):
-                return str(k)
+                return str(k)  # type: ignore
+
+    if base:
+        # Unknown base file type is default
+        return ""
+
     if path.is_dir():
         return "role"
 
     if str(path) == '/dev/stdin':
         return "playbook"
-    raise RuntimeError("Unable to determine file type for %s" % pathex)
+
+    # Unknown file types report a empty string (evaluated as False)
+    return ""
 
 
 class Lintable:
@@ -108,6 +123,7 @@ class Lintable:
         # Filename is effective file on disk, for stdin is a namedtempfile
         self.filename: str = str(name)
         self.dir: str = ""
+        self.kind: Optional[FileType] = None
 
         if isinstance(name, str):
             self.name = normpath(name)
@@ -128,6 +144,7 @@ class Lintable:
                 self.role = role.name
 
         if str(self.path) in ['/dev/stdin', '-']:
+            # pylint: disable=consider-using-with
             self.file = NamedTemporaryFile(mode="w+", suffix="playbook.yml")
             self.filename = self.file.name
             self._content = sys.stdin.read()
@@ -145,6 +162,9 @@ class Lintable:
                 self.dir = str(self.path.resolve())
             else:
                 self.dir = str(self.path.parent.resolve())
+
+        # determine base file kind (yaml, xml, ini, ...)
+        self.base_kind = kind_from_path(self.path, base=True)
 
     def __getitem__(self, key: Any) -> Any:
         """Provide compatibility subscriptable support."""
@@ -184,60 +204,110 @@ class Lintable:
         return f"{self.name} ({self.kind})"
 
 
-def get_yaml_files(options: Namespace) -> Dict[str, Any]:
-    """Find all yaml files."""
+def discover_lintables(options: Namespace) -> Dict[str, Any]:
+    """Find all files that we know how to lint."""
     # git is preferred as it also considers .gitignore
-    git_command = ['git', 'ls-files', '-z', '*.yaml', '*.yml']
-    _logger.info("Discovering files to lint: %s", ' '.join(git_command))
-
+    git_command_present = [
+        'git',
+        'ls-files',
+        '--cached',
+        '--others',
+        '--exclude-standard',
+        '-z',
+    ]
+    git_command_absent = ['git', 'ls-files', '--deleted', '-z']
     out = None
 
     try:
-        out = subprocess.check_output(
-            git_command, stderr=subprocess.STDOUT, universal_newlines=True
+        out_present = subprocess.check_output(
+            git_command_present, stderr=subprocess.STDOUT, universal_newlines=True
         ).split("\x00")[:-1]
-    except subprocess.CalledProcessError as exc:
-        _logger.warning(
-            "Failed to discover yaml files to lint using git: %s",
-            exc.output.rstrip('\n'),
+        _logger.info(
+            "Discovered files to lint using: %s", ' '.join(git_command_present)
         )
+
+        out_absent = subprocess.check_output(
+            git_command_absent, stderr=subprocess.STDOUT, universal_newlines=True
+        ).split("\x00")[:-1]
+        _logger.info("Excluded removed files using: %s", ' '.join(git_command_absent))
+
+        out = set(out_present) - set(out_absent)
+    except subprocess.CalledProcessError as exc:
+        if not (exc.returncode == 128 and 'fatal: not a git repository' in exc.output):
+            _logger.warning(
+                "Failed to discover lintable files using git: %s",
+                exc.output.rstrip('\n'),
+            )
     except FileNotFoundError as exc:
         if options.verbosity:
             _logger.warning("Failed to locate command: %s", exc)
 
     if out is None:
-        out = [
-            os.path.join(root, name)
-            for root, dirs, files in os.walk('.')
-            for name in files
-            if name.endswith('.yaml') or name.endswith('.yml')
-        ]
+        exclude_pattern = "|".join(str(x) for x in options.exclude_paths)
+        _logger.info("Looking up for files, excluding %s ...", exclude_pattern)
+        out = WcMatch(
+            '.', exclude_pattern=exclude_pattern, flags=RECURSIVE, limit=256
+        ).match()
 
     return OrderedDict.fromkeys(sorted(out))
 
 
-def guess_project_dir() -> str:
-    """Return detected project dir or user home directory."""
-    result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        stderr=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        universal_newlines=True,
-        check=False,
+def guess_project_dir(config_file: str) -> str:
+    """Return detected project dir or current working directory."""
+    path = None
+    if config_file is not None:
+        target = pathlib.Path(config_file)
+        if target.exists():
+            path = str(target.parent.absolute())
+
+    if path is None:
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                stderr=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                universal_newlines=True,
+                check=False,
+            )
+
+            path = result.stdout.splitlines()[0]
+        except subprocess.CalledProcessError as exc:
+            if not (
+                exc.returncode == 128 and 'fatal: not a git repository' in exc.output
+            ):
+                _logger.warning(
+                    "Failed to guess project directory using git: %s",
+                    exc.output.rstrip('\n'),
+                )
+        except FileNotFoundError as exc:
+            _logger.warning("Failed to locate command: %s", exc)
+
+    if path is None:
+        path = os.getcwd()
+
+    _logger.info(
+        "Guessed %s as project root directory",
+        path,
     )
 
-    if result.returncode != 0:
-        return str(Path.home())
-
-    return result.stdout.splitlines()[0]
+    return path
 
 
 def expand_dirs_in_lintables(lintables: Set[Lintable]) -> None:
     """Return all recognized lintables within given directory."""
-    all_files = get_yaml_files(options)
+    should_expand = False
 
-    for item in copy.copy(lintables):
+    for item in lintables:
         if item.path.is_dir():
-            for filename in all_files:
-                if filename.startswith(str(item.path)):
-                    lintables.add(Lintable(filename))
+            should_expand = True
+            break
+
+    if should_expand:
+        # this relies on git and we do not want to call unless needed
+        all_files = discover_lintables(options)
+
+        for item in copy.copy(lintables):
+            if item.path.is_dir():
+                for filename in all_files:
+                    if filename.startswith(str(item.path)):
+                        lintables.add(Lintable(filename))

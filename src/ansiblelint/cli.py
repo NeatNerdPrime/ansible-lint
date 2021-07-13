@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 
 import yaml
 
+from ansiblelint.config import DEFAULT_KINDS
 from ansiblelint.constants import (
     CUSTOM_RULESDIR_ENVVAR,
     DEFAULT_RULESDIR,
@@ -156,9 +157,9 @@ def get_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '-q',
         dest='quiet',
-        default=False,
-        action='store_true',
-        help="quieter, although not silent output",
+        default=0,
+        action='count',
+        help="quieter, reduce verbosity, can be specified twice.",
     )
     parser.add_argument(
         '-p',
@@ -186,7 +187,7 @@ def get_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--project-dir',
         dest='project_dir',
-        default=None,
+        default=".",
         help="Location of project/repository, autodetected based on location "
         " of configuration file.",
     )
@@ -227,7 +228,7 @@ def get_cli_parser() -> argparse.ArgumentParser:
         '-v',
         dest='verbosity',
         action='count',
-        help="Increase verbosity level",
+        help="Increase verbosity level (-vv for more)",
         default=0,
     )
     parser.add_argument(
@@ -244,6 +245,13 @@ def get_cli_parser() -> argparse.ArgumentParser:
         action='append',
         help="only warn about these rules, unless overridden in "
         "config file defaults to 'experimental'",
+    )
+    parser.add_argument(
+        '--enable-list',
+        dest='enable_list',
+        default=[],
+        action='append',
+        help="activate optional rules by their tag name",
     )
     # Do not use store_true/store_false because they create opposite defaults.
     parser.add_argument(
@@ -306,16 +314,21 @@ def merge_config(file_config: Dict[Any, Any], cli_config: Namespace) -> Namespac
     )
     # maps lists to their default config values
     lists_map = {
-        'exclude_paths': [],
+        'exclude_paths': [".cache", ".git", ".hg", ".svn", ".tox"],
         'rulesdir': [],
         'skip_list': [],
         'tags': [],
-        'warn_list': ['experimental'],
+        'warn_list': ['experimental', 'role-name'],
         'mock_modules': [],
         'mock_roles': [],
+        'enable_list': [],
     }
 
-    scalar_map = {"loop_var_prefix": None, "project_dir": None}
+    scalar_map = {
+        "loop_var_prefix": None,
+        "project_dir": ".",
+        "var_naming_pattern": "^[a-z_][a-z0-9_]*$",
+    }
 
     if not file_config:
         # use defaults if we don't have a config file and the commandline
@@ -350,6 +363,11 @@ def merge_config(file_config: Dict[Any, Any], cli_config: Namespace) -> Namespac
     for entry, value in file_config.items():
         setattr(cli_config, entry, value)
 
+    # append default kinds to the custom list
+    kinds = file_config.get('kinds', [])
+    kinds.extend(DEFAULT_KINDS)
+    setattr(cli_config, 'kinds', kinds)
+
     return cli_config
 
 
@@ -363,14 +381,16 @@ def get_config(arguments: List[str]) -> Namespace:
 
     options.rulesdirs = get_rules_dirs(options.rulesdir, options.use_default_rules)
 
-    if not options.project_dir:
-        project_dir = os.path.dirname(
-            os.path.abspath(
-                options.config_file or f"{guess_project_dir()}/.ansiblelint"
-            )
-        )
+    if options.project_dir == ".":
+        project_dir = guess_project_dir(options.config_file)
         options.project_dir = normpath(project_dir)
+    if not options.project_dir or not os.path.exists(options.project_dir):
+        raise RuntimeError(
+            f"Failed to determine a valid project_dir: {options.project_dir}"
+        )
 
+    # Compute final verbosity level by subtracting -q counter.
+    options.verbosity -= options.quiet
     return config
 
 

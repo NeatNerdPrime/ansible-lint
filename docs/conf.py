@@ -18,6 +18,8 @@ import os
 import sys
 from pathlib import Path
 
+import pkg_resources
+
 # Make in-tree extension importable in non-tox setups/envs, like RTD.
 # Refs:
 # https://github.com/readthedocs/readthedocs.org/issues/6311
@@ -55,6 +57,18 @@ extensions = [
     'rules_table_generator_ext',  # in-tree extension
 ]
 
+
+# Fail safe protection to detect conflicting packages
+try:
+    pkg_resources.get_distribution("sphinxcontrib-programoutput")
+    print(
+        "FATAL: We detected presence of sphinxcontrib-programoutput package instead of sphinxcontrib-programoutput2 one. You must be sure the first is not installed.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+except pkg_resources.DistributionNotFound:
+    pass
+
 # Later on, add 'sphinx.ext.viewcode' to the list if you want to have
 # colorized code generated too for references.
 
@@ -70,7 +84,20 @@ master_doc = 'index'
 
 # General substitutions.
 project = 'Ansible Lint Documentation'
-copyright = "2013-2020 Ansible, Inc"  # pylint: disable=redefined-builtin
+copyright = "2013-2021 Ansible, Inc"  # pylint: disable=redefined-builtin
+
+github_url = "https://github.com"
+github_repo_org = "ansible"
+github_repo_name = "ansible-lint"
+github_repo_slug = f"{github_repo_org}/{github_repo_name}"
+github_repo_url = f"{github_url}/{github_repo_slug}"
+
+extlinks = {
+    "issue": (f"{github_repo_url}/issues/%s", "#"),
+    "pr": (f"{github_repo_url}/pull/%s", "PR #"),
+    "commit": (f"{github_repo_url}/commit/%s", ""),
+    "gh": (f"{github_url}/%s", "GitHub: "),
+}
 
 # The default replacements for |version| and |release|, also used in various
 # other places throughout the built documents.
@@ -140,6 +167,29 @@ rst_epilog = """
 
 html_theme_path = ['../_themes']
 html_theme = 'sphinx_ansible_theme'
+
+html_theme_options = {
+    "collapse_navigation": False,
+    "analytics_id": "UA-128382387-1",
+    "style_nav_header_background": "#5bbdbf",
+    "style_external_links": True,
+    # 'canonical_url': "https://docs.ansible.com/ansible/latest/",
+    'vcs_pageview_mode': 'edit',
+    "navigation_depth": 3,
+}
+
+html_context = {
+    'display_github': 'True',
+    'github_user': 'ansible-community',
+    'github_repo': 'ansible-lint',
+    'github_version': 'master/docs/',
+    'current_version': version,
+    'latest_version': 'latest',
+    # list specifically out of order to make latest work
+    'available_versions': ('latest', 'stable'),
+    'css_files': (),  # overrides to the standard theme
+}
+
 html_short_title = 'Ansible Lint Documentation'
 
 # The style sheet to use for HTML and HTML Help pages. A file of that name
@@ -242,17 +292,10 @@ latex_documents = [
 
 autoclass_content = 'both'
 
-intersphinx_mapping = {
-    'python': ('https://docs.python.org/2/', (None, '../python2-2.7.13.inv')),
-    'python3': ('https://docs.python.org/3/', (None, '../python3-3.6.2.inv')),
-    'jinja2': ('http://jinja.pocoo.org/docs/', (None, '../jinja2-2.9.7.inv')),
-}
-
-
 # table width fix via: https://rackerlabs.github.io/docs-rackspace/tools/rtd-tables.html
 html_static_path = ['_static']
-html_context = {
-    'css_files': [
-        '_static/theme_overrides.css',  # override wide tables in RTD theme
-    ],
-}
+
+html_css_files = [
+    'theme_overrides.css',  # override wide tables in RTD theme
+    'ansi.css',
+]
